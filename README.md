@@ -1,4 +1,4 @@
-# Copper slag concrete — compressive strength ANN
+# Copper slag concrete — compressive strength ANN.
 
 Browser-based app that trains a small neural network (**TensorFlow.js**) to predict **compressive strength** from mix design and SEM-style scalars: cement, water, copper slag %, curing days, porosity %, and crack density. All training and inference run **client-side** (no server).
 
