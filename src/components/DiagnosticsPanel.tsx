@@ -83,7 +83,7 @@ export function DiagnosticsPanel({
             transition={springSoft}
           >
             <p className="mb-2 font-mono text-[0.7rem] text-slate-500">
-              Hold-out: actual vs predicted
+              Hold-out: actual vs predicted (MPa)
             </p>
             <div className="rounded-xl border border-white/5 bg-black/20 p-2">
               <ScatterPlot
@@ -93,8 +93,8 @@ export function DiagnosticsPanel({
             </div>
             <ul className="mt-2 space-y-0.5 pl-4 font-mono text-xs text-emerald-300/95">
               <li>R² = {bundle.testMetrics.r2.toFixed(4)}</li>
-              <li>RMSE = {bundle.testMetrics.rmse.toFixed(3)}</li>
-              <li>MAE = {bundle.testMetrics.mae.toFixed(3)}</li>
+              <li>RMSE = {bundle.testMetrics.rmse.toFixed(3)} MPa</li>
+              <li>MAE = {bundle.testMetrics.mae.toFixed(3)} MPa</li>
             </ul>
           </motion.div>
         )}

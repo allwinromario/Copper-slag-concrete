@@ -35,13 +35,13 @@ type DataSource = 'sample' | 'sem';
 const defaultInputs: FeatureRow = [320, 165, 20, 28, 7.2, 2.1];
 
 const TABLE_HEADERS = [
-  'Cement',
-  'Water',
+  'Cement (kg/m³)',
+  'Water (kg/m³)',
   'Slag %',
   'Days',
   'Por. %',
-  'Crack',
-  "f'c",
+  'Crack (mm/mm²)',
+  "f'c (MPa)",
 ] as const;
 
 const glassPanel =
@@ -776,7 +776,7 @@ export default function App() {
               <motion.section
                 layout
                 className={`${glassPanel} relative mt-2 shrink-0 px-3 py-3 sm:px-4 sm:py-3.5`}
-                aria-label="Predicted compressive strength"
+                aria-label={`Predicted compressive strength ${prediction.toFixed(2)} megapascals`}
                 aria-live="polite"
                 initial={{ opacity: 0, y: 12 }}
                 animate={{ opacity: 1, y: 0 }}
@@ -802,10 +802,11 @@ export default function App() {
                   transition={{ delay: 0.04, ...springSoft }}
                 >
                   <p className="text-sm font-medium text-slate-400 sm:text-base">
-                    compressive strength
+                    compressive strength (MPa)
                   </p>
                   <p className="font-mono text-xl font-semibold tabular-nums tracking-tight text-cyan-300 sm:text-2xl">
-                    {prediction.toFixed(2)}
+                    <span>{prediction.toFixed(2)}</span>
+                    <span className="ml-1.5 text-base font-medium text-slate-500 sm:text-lg">MPa</span>
                   </p>
                 </motion.div>
               </motion.section>

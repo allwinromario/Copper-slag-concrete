@@ -88,7 +88,7 @@ function ScatterPlot({ actual, pred }: { actual: number[]; pred: number[] }) {
       className="h-auto w-full max-w-[280px]"
       viewBox={`0 0 ${SCAT_W} ${SCAT_H}`}
       role="img"
-      aria-label="Actual versus predicted strength on hold-out set"
+      aria-label="Actual versus predicted compressive strength in megapascals on hold-out set"
     >
       <rect width="100%" height="100%" rx={8} className="fill-[#0a0d12]" />
       <line
@@ -106,10 +106,10 @@ function ScatterPlot({ actual, pred }: { actual: number[]; pred: number[] }) {
         y={SCAT_H - 8}
         textAnchor="end"
       >
-        predicted →
+        predicted (MPa) →
       </text>
       <text className="fill-slate-500 font-mono text-[8px]" x={SCAT_PAD} y={SCAT_PAD - 8}>
-        ↑ actual
+        ↑ actual (MPa)
       </text>
       {actual.map((a, i) => {
         const { x, y } = toXY(a, pred[i]);

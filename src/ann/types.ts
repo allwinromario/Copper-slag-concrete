@@ -5,7 +5,7 @@ export const FEATURE_LABELS = [
   'Copper slag %',
   'Curing days',
   'Porosity %',
-  'Crack density',
+  'Crack density (mm/mm²)',
 ] as const;
 
 export type FeatureRow = [number, number, number, number, number, number];
