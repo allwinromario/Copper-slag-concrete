@@ -38,6 +38,7 @@ import {
 } from './ann/types';
 import { DiagnosticsPanel } from './components/DiagnosticsPanel';
 import { MethodologyDialog } from './components/MethodologyDialog';
+import { SemImagesPanel, type SemImage } from './components/SemImagesPanel';
 import { TrainingSidebar } from './components/TrainingSidebar';
 import {
   Button,
@@ -61,7 +62,7 @@ import {
   staggerContainer,
 } from './lib/motion';
 
-type DataSource = 'sample' | 'url';
+type DataSource = 'sample' | 'url' | 'sem';
 
 const TABLE_HEADERS = [
   'Cement',
@@ -208,6 +209,11 @@ interface DataColumnProps {
   fetchingUrl: boolean;
   loadFromUrl: (url?: string) => void;
   loadExternal: (d: ExternalDataset) => void;
+  semImages: SemImage[];
+  addSemFiles: (files: File[]) => void;
+  removeSemImage: (id: string) => void;
+  updateSemCaption: (id: string, caption: string) => void;
+  clearSemImages: () => void;
 }
 
 function DataColumn(p: DataColumnProps) {
@@ -227,6 +233,11 @@ function DataColumn(p: DataColumnProps) {
     fetchingUrl,
     loadFromUrl,
     loadExternal,
+    semImages,
+    addSemFiles,
+    removeSemImage,
+    updateSemCaption,
+    clearSemImages,
   } = p;
 
   return (
@@ -359,13 +370,25 @@ function DataColumn(p: DataColumnProps) {
             </div>
           </>
         )}
+
+        {dataSource === 'sem' && (
+          <SemImagesPanel
+            images={semImages}
+            onAddFiles={addSemFiles}
+            onRemove={removeSemImage}
+            onCaptionChange={updateSemCaption}
+            onClearAll={clearSemImages}
+          />
+        )}
       </div>
 
-      <div className="mt-3 flex min-h-0 flex-1 flex-col">
-        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-white/[0.06] bg-black/30">
-          <DatasetPreviewTable parsed={parsed} />
+      {dataSource !== 'sem' && (
+        <div className="mt-3 flex min-h-0 flex-1 flex-col">
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-white/[0.06] bg-black/30">
+            <DatasetPreviewTable parsed={parsed} />
+          </div>
         </div>
-      </div>
+      )}
     </>
   );
 }
@@ -581,6 +604,52 @@ export default function App() {
   const [valFrac, setValFrac] = useState(0.2);
   const [epochLogs, setEpochLogs] = useState<EpochLog[]>([]);
   const [batchProgress, setBatchProgress] = useState<BatchProgress | null>(null);
+  const [semImages, setSemImages] = useState<SemImage[]>([]);
+
+  const addSemFiles = useCallback(async (files: File[]) => {
+    const items = await Promise.all(
+      files.map(async (file) => {
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          const r = new FileReader();
+          r.onload = () => resolve(r.result as string);
+          r.onerror = () => reject(r.error);
+          r.readAsDataURL(file);
+        });
+        const dims = await new Promise<{ w: number; h: number }>((resolve) => {
+          const img = new Image();
+          img.onload = () => resolve({ w: img.naturalWidth, h: img.naturalHeight });
+          img.onerror = () => resolve({ w: 0, h: 0 });
+          img.src = dataUrl;
+        });
+        return {
+          id:
+            typeof crypto !== 'undefined' && 'randomUUID' in crypto
+              ? crypto.randomUUID()
+              : `sem-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          name: file.name,
+          size: file.size,
+          dataUrl,
+          width: dims.w,
+          height: dims.h,
+          caption: '',
+          uploadedAt: Date.now(),
+        } satisfies SemImage;
+      })
+    );
+    setSemImages((prev) => [...prev, ...items]);
+  }, []);
+
+  const removeSemImage = useCallback((id: string) => {
+    setSemImages((prev) => prev.filter((i) => i.id !== id));
+  }, []);
+
+  const updateSemCaption = useCallback((id: string, caption: string) => {
+    setSemImages((prev) =>
+      prev.map((i) => (i.id === id ? { ...i, caption } : i))
+    );
+  }, []);
+
+  const clearSemImages = useCallback(() => setSemImages([]), []);
   const [training, setTraining] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [bundle, setBundle] = useState<TrainedBundle | null>(null);
@@ -1013,7 +1082,7 @@ export default function App() {
               aria-label="Data source"
               className="flex gap-1 rounded-xl border border-white/[0.06] bg-black/30 p-1"
             >
-              {(['sample', 'url'] as const).map((tab) => (
+              {(['sample', 'url', 'sem'] as const).map((tab) => (
                 <motion.button
                   key={tab}
                   type="button"
@@ -1034,7 +1103,11 @@ export default function App() {
                       transition={{ type: 'spring', stiffness: 380, damping: 32 }}
                     />
                   )}
-                  {tab === 'sample' ? 'Sample data' : 'Fetch CSV from URL'}
+                  {tab === 'sample'
+                    ? 'Sample data'
+                    : tab === 'url'
+                    ? 'Fetch CSV from URL'
+                    : 'Add SEM images'}
                 </motion.button>
               ))}
             </motion.div>
@@ -1069,6 +1142,11 @@ export default function App() {
                 fetchingUrl={fetchingUrl}
                 loadFromUrl={loadFromUrl}
                 loadExternal={loadExternal}
+                semImages={semImages}
+                addSemFiles={addSemFiles}
+                removeSemImage={removeSemImage}
+                updateSemCaption={updateSemCaption}
+                clearSemImages={clearSemImages}
               />
             </motion.section>
 
