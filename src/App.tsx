@@ -6,7 +6,7 @@ import {
   useScroll,
   useTransform,
 } from 'framer-motion';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type * as tfTypes from '@tensorflow/tfjs';
 import { parseDataset } from './ann/csv';
 import { DEMO_CSV, generateDemoData } from './ann/demoData';
@@ -216,7 +216,7 @@ interface DataColumnProps {
   clearSemImages: () => void;
 }
 
-function DataColumn(p: DataColumnProps) {
+const DataColumn = memo(function DataColumn(p: DataColumnProps) {
   const {
     dataSource,
     syntheticRowCount,
@@ -391,7 +391,7 @@ function DataColumn(p: DataColumnProps) {
       )}
     </>
   );
-}
+});
 
 function DatasetDialog({
   open,
@@ -668,6 +668,7 @@ export default function App() {
   const [optimizingInputs, setOptimizingInputs] = useState(false);
 
   const modelRef = useRef<tfTypes.Sequential | null>(null);
+  const lastBatchEmitRef = useRef<number>(0);
   const optimizeInputsBusy = useRef(false);
   const mainScrollRef = useRef<HTMLDivElement>(null);
   const { scrollYProgress } = useScroll({ container: mainScrollRef });
@@ -805,6 +806,7 @@ export default function App() {
     setTraining(true);
     setEpochLogs([]);
     setBatchProgress(null);
+    lastBatchEmitRef.current = 0;
     setBundle(null);
     setPrediction(null);
 
@@ -828,6 +830,11 @@ export default function App() {
             setEpochLogs((prev) => [...prev, log]);
           },
           onBatch: (p) => {
+            const now = performance.now();
+            const isBoundary =
+              p.samplesProcessed === 0 || p.samplesProcessed >= p.trainSize;
+            if (!isBoundary && now - lastBatchEmitRef.current < 80) return;
+            lastBatchEmitRef.current = now;
             setBatchProgress(p);
           },
         }
