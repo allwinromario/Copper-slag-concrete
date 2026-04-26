@@ -67,7 +67,14 @@ const SCAT_W = 280;
 const SCAT_H = 220;
 const SCAT_PAD = 32;
 
-function ScatterPlot({ actual, pred }: { actual: number[]; pred: number[] }) {
+interface ScatterPlotProps {
+  actual: number[];
+  pred: number[];
+  unit?: string;
+  title?: string;
+}
+
+function ScatterPlot({ actual, pred, unit, title }: ScatterPlotProps) {
   if (actual.length === 0) return null;
 
   const all = [...actual, ...pred];
@@ -83,12 +90,19 @@ function ScatterPlot({ actual, pred }: { actual: number[]; pred: number[] }) {
     return { x, y };
   };
 
+  const xLabel = unit ? `predicted (${unit}) →` : 'predicted →';
+  const yLabel = unit ? `↑ actual (${unit})` : '↑ actual';
+
   return (
     <svg
       className="h-auto w-full max-w-[280px]"
       viewBox={`0 0 ${SCAT_W} ${SCAT_H}`}
       role="img"
-      aria-label="Actual versus predicted compressive strength in megapascals on hold-out set"
+      aria-label={
+        title
+          ? `Actual versus predicted ${title} on hold-out set`
+          : 'Actual versus predicted values on hold-out set'
+      }
     >
       <rect width="100%" height="100%" rx={8} className="fill-[#0a0d12]" />
       <line
@@ -106,10 +120,10 @@ function ScatterPlot({ actual, pred }: { actual: number[]; pred: number[] }) {
         y={SCAT_H - 8}
         textAnchor="end"
       >
-        predicted (MPa) →
+        {xLabel}
       </text>
       <text className="fill-slate-500 font-mono text-[8px]" x={SCAT_PAD} y={SCAT_PAD - 8}>
-        ↑ actual (MPa)
+        {yLabel}
       </text>
       {actual.map((a, i) => {
         const { x, y } = toXY(a, pred[i]);

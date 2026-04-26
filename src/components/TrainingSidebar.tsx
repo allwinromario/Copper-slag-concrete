@@ -13,6 +13,8 @@ export interface TrainingSidebarProps {
   valFrac: number;
   setValFrac: (n: number) => void;
   onOptimizeHyperparams: () => void;
+  onViewDataset?: () => void;
+  datasetSummary?: { rows: number; outputs: number };
 }
 
 const sectionItem = {
@@ -34,6 +36,8 @@ export function TrainingSidebar({
   valFrac,
   setValFrac,
   onOptimizeHyperparams,
+  onViewDataset,
+  datasetSummary,
 }: TrainingSidebarProps) {
   const reduce = useReducedMotion();
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -102,7 +106,40 @@ export function TrainingSidebar({
               initial="hidden"
               animate="show"
             >
-              <motion.section custom={0} variants={sectionItem} className="mb-8">
+              {onViewDataset && (
+                <motion.section custom={0} variants={sectionItem} className="mb-8">
+                  <h3 className="mb-2 text-sm font-semibold text-white">Dataset</h3>
+                  <p className="mb-3 text-sm text-slate-500">
+                    Inspect every parsed row and output column in a full-screen
+                    table.
+                  </p>
+                  <motion.button
+                    type="button"
+                    onClick={onViewDataset}
+                    disabled={!datasetSummary || datasetSummary.rows === 0}
+                    className="flex w-full items-center justify-between gap-3 rounded-xl border border-cyan-400/25 bg-cyan-400/[0.06] px-4 py-2.5 text-sm font-semibold text-cyan-100 transition-colors hover:border-cyan-300/45 hover:bg-cyan-400/[0.1] disabled:cursor-not-allowed disabled:border-white/10 disabled:bg-white/[0.03] disabled:text-slate-500"
+                    whileHover={
+                      datasetSummary && datasetSummary.rows > 0
+                        ? { scale: 1.01 }
+                        : undefined
+                    }
+                    whileTap={
+                      datasetSummary && datasetSummary.rows > 0
+                        ? tapScale
+                        : undefined
+                    }
+                  >
+                    <span>View parsed CSV</span>
+                    <span className="font-mono text-[0.7rem] text-cyan-200/70">
+                      {datasetSummary && datasetSummary.rows > 0
+                        ? `${datasetSummary.rows} row${datasetSummary.rows === 1 ? '' : 's'} · ${datasetSummary.outputs} output${datasetSummary.outputs === 1 ? '' : 's'}`
+                        : 'no data yet'}
+                    </span>
+                  </motion.button>
+                </motion.section>
+              )}
+
+              <motion.section custom={1} variants={sectionItem} className="mb-8">
                 <h3 className="mb-2 text-sm font-semibold text-white">Model architecture</h3>
                 <p className="mb-3 font-mono text-xs text-slate-500">
                   Optimizer: Adam · Loss: MSE · Target z-score normalized
@@ -139,7 +176,7 @@ export function TrainingSidebar({
                 </div>
               </motion.section>
 
-              <motion.section custom={1} variants={sectionItem}>
+              <motion.section custom={2} variants={sectionItem}>
                 <h3 className="mb-2 text-sm font-semibold text-white">Hyperparameters</h3>
                 <p className="mb-3 text-sm text-slate-500">
                   Used when you click <strong className="text-slate-300">Train ANN</strong> on the

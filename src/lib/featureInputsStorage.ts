@@ -1,13 +1,17 @@
-import type { FeatureRow } from '../ann/types';
+import { FEATURE_DEFAULTS, N_RAW_FEATURES, type FeatureRow } from '../ann/types';
 
-const STORAGE_KEY = 'ann.inferenceFeatureRow.v1';
+/**
+ * Bumped to v2 with the new 10-feature schema. Old v1 keys are ignored
+ * automatically because the length and key name no longer match.
+ */
+const STORAGE_KEY = 'ann.inferenceFeatureRow.v2';
 
 export function loadStoredFeatureInputs(fallback: FeatureRow): FeatureRow {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return fallback;
     const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed) || parsed.length !== 6) return fallback;
+    if (!Array.isArray(parsed) || parsed.length !== N_RAW_FEATURES) return fallback;
     const nums = parsed.map((x) => Number(x));
     if (!nums.every((x) => Number.isFinite(x))) return fallback;
     return nums as FeatureRow;
@@ -23,3 +27,5 @@ export function persistFeatureInputs(row: FeatureRow): void {
     // private mode / quota
   }
 }
+
+export const FEATURE_INPUT_FALLBACK: FeatureRow = [...FEATURE_DEFAULTS];

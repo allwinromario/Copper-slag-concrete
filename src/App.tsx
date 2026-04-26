@@ -10,42 +10,85 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type * as tfTypes from '@tensorflow/tfjs';
 import { parseDataset } from './ann/csv';
 import { DEMO_CSV, generateDemoData } from './ann/demoData';
+import { COPPER_SLAG_TEMPLATE_CSV } from './data/copperSlagTemplate';
+import { EXTERNAL_DATASETS, type ExternalDataset } from './data/externalSources';
 import {
   buildOptimizedSyntheticCsv,
+  EXPOSURE_KEYS,
   OPTIMAL_TRAINING,
   searchMaxStrengthInputs,
   searchMaxStrengthSynthetic,
 } from './ann/optimize';
-import { predictStrength, trainAnn, type TrainedBundle } from './ann/trainAnn';
-import type { EpochLog, FeatureRow } from './ann/types';
-import { FEATURE_LABELS } from './ann/types';
+import {
+  predictAll,
+  trainAnn,
+  type TrainedBundle,
+} from './ann/trainAnn';
+import {
+  FEATURE_DEFAULTS,
+  FEATURE_LABELS,
+  OUTPUT_KEYS,
+  OUTPUT_LABELS,
+  OUTPUT_UNITS,
+  deriveRatios,
+  type BatchProgress,
+  type EpochLog,
+  type FeatureRow,
+  type OutputKey,
+} from './ann/types';
 import { DiagnosticsPanel } from './components/DiagnosticsPanel';
+import { MethodologyDialog } from './components/MethodologyDialog';
 import { TrainingSidebar } from './components/TrainingSidebar';
-import { loadStoredFeatureInputs, persistFeatureInputs } from './lib/featureInputsStorage';
+import {
+  Button,
+  Field,
+  SectionHeader,
+  StatCard,
+} from './components/ui';
+import {
+  loadStoredFeatureInputs,
+  persistFeatureInputs,
+} from './lib/featureInputsStorage';
+import {
+  EXPOSURE_LABELS,
+  complianceReport,
+  type Exposure,
+} from './lib/isCode';
 import {
   fadeUp,
   springLayout,
   springSoft,
   staggerContainer,
-  tapScale,
 } from './lib/motion';
 
-type DataSource = 'sample' | 'sem';
-
-const defaultInputs: FeatureRow = [320, 165, 20, 28, 7.2, 2.1];
+type DataSource = 'sample' | 'url';
 
 const TABLE_HEADERS = [
-  'Cement (kg/m³)',
-  'Water (kg/m³)',
+  'Cement',
+  'Water',
+  'Fine',
+  'Coarse',
   'Slag %',
   'Days',
-  'Por. %',
-  'Crack (mm/mm²)',
-  "f'c (MPa)",
+  'SGc',
+  'SGf',
+  'SGca',
+  'FM',
+  "f'c",
+  'fst',
+  'fr',
+  'Ec',
+  'ρ',
 ] as const;
 
+const INPUT_GROUPS: { title: string; indices: number[] }[] = [
+  { title: 'Mix proportions (kg/m³)', indices: [0, 1, 2, 3] },
+  { title: 'Mix details', indices: [4, 5] },
+  { title: 'Material properties', indices: [6, 7, 8, 9] },
+];
+
 const glassPanel =
-  'relative overflow-hidden rounded-3xl border border-white/10 bg-gradient-to-br from-white/[0.07] to-white/[0.02] shadow-2xl shadow-black/50 backdrop-blur-2xl ring-1 ring-cyan-400/5 transition-shadow duration-500 hover:shadow-cyan-500/10 hover:ring-cyan-400/15';
+  'relative overflow-hidden rounded-3xl border border-white/[0.08] bg-white/[0.025] shadow-[0_1px_0_0_rgba(255,255,255,0.04)_inset,0_24px_48px_-24px_rgba(0,0,0,0.6)] backdrop-blur-xl transition-shadow duration-300';
 
 function DatasetPreviewTable({
   parsed,
@@ -72,18 +115,27 @@ function DatasetPreviewTable({
   }
 
   const total = parsed.X.length;
+  const fck = parsed.y.fck ?? [];
+  const fst = parsed.y.fst ?? [];
+  const ffl = parsed.y.ffl ?? [];
+  const ec = parsed.y.ec ?? [];
+  const density = parsed.y.density ?? [];
+
+  const cell = (v: number | undefined, dp: number) =>
+    v === undefined || !Number.isFinite(v) ? '—' : v.toFixed(dp);
 
   return (
     <>
       <motion.div
-        className="flex shrink-0 items-center justify-between gap-3 border-b border-white/10 bg-amber-200/[0.06] px-3 py-2"
+        className="flex shrink-0 items-center justify-between gap-3 border-b border-white/[0.06] bg-white/[0.02] px-3 py-2"
         style={{ opacity: headOpacity }}
       >
-        <h3 className="text-[0.65rem] font-semibold uppercase tracking-[0.1em] text-amber-200/90">
+        <h3 className="text-[0.6rem] font-medium uppercase tracking-[0.12em] text-slate-400">
           Dataset (CSV)
         </h3>
         <span className="font-mono text-[0.65rem] text-slate-500">
-          {total} row{total === 1 ? '' : 's'} · scroll
+          {total} row{total === 1 ? '' : 's'} · {parsed.availableOutputs.length} output
+          {parsed.availableOutputs.length === 1 ? '' : 's'}
         </span>
       </motion.div>
       <div
@@ -92,8 +144,8 @@ function DatasetPreviewTable({
       >
         <table className="w-full border-collapse font-mono text-[0.7rem]">
           <thead>
-            <tr className="sticky top-0 z-[1] border-b border-amber-200/15 bg-[#0c0e14]/95 backdrop-blur-md">
-              <th className="w-10 px-2 py-2 text-center text-[0.65rem] font-semibold uppercase tracking-wide text-slate-500">
+            <tr className="sticky top-0 z-[1] border-b border-white/[0.08] bg-[#0a0b10]/95 backdrop-blur-md">
+              <th className="w-10 px-2 py-2 text-center text-[0.6rem] font-medium uppercase tracking-[0.1em] text-slate-500">
                 #
               </th>
               {TABLE_HEADERS.map((h) => (
@@ -101,7 +153,7 @@ function DatasetPreviewTable({
                   key={h}
                   scope="col"
                   title={h}
-                  className="whitespace-nowrap px-2 py-2 text-right text-[0.65rem] font-semibold text-slate-500"
+                  className="whitespace-nowrap px-2 py-2 text-right text-[0.6rem] font-medium uppercase tracking-[0.1em] text-slate-500"
                 >
                   {h}
                 </th>
@@ -113,16 +165,24 @@ function DatasetPreviewTable({
               <motion.tr
                 key={i}
                 initial={false}
-                className="border-b border-white/[0.06] odd:bg-white/[0.02] hover:bg-cyan-400/[0.04]"
+                className="border-b border-white/[0.04] transition-colors duration-150 odd:bg-white/[0.015] hover:bg-cyan-400/[0.05]"
               >
                 <td className="px-2 py-1.5 text-center text-slate-500">{i + 1}</td>
-                <td className="px-2 py-1.5 text-right text-slate-200">{row[0].toFixed(1)}</td>
-                <td className="px-2 py-1.5 text-right text-slate-200">{row[1].toFixed(1)}</td>
-                <td className="px-2 py-1.5 text-right text-slate-200">{row[2].toFixed(1)}</td>
-                <td className="px-2 py-1.5 text-right text-slate-200">{row[3]}</td>
-                <td className="px-2 py-1.5 text-right text-slate-200">{row[4].toFixed(2)}</td>
-                <td className="px-2 py-1.5 text-right text-slate-200">{row[5].toFixed(2)}</td>
-                <td className="px-2 py-1.5 text-right text-slate-200">{parsed.y[i].toFixed(2)}</td>
+                <td className="px-2 py-1.5 text-right text-slate-200">{row[0].toFixed(0)}</td>
+                <td className="px-2 py-1.5 text-right text-slate-200">{row[1].toFixed(0)}</td>
+                <td className="px-2 py-1.5 text-right text-slate-200">{row[2].toFixed(0)}</td>
+                <td className="px-2 py-1.5 text-right text-slate-200">{row[3].toFixed(0)}</td>
+                <td className="px-2 py-1.5 text-right text-slate-200">{row[4].toFixed(0)}</td>
+                <td className="px-2 py-1.5 text-right text-slate-200">{row[5]}</td>
+                <td className="px-2 py-1.5 text-right text-slate-200">{row[6].toFixed(2)}</td>
+                <td className="px-2 py-1.5 text-right text-slate-200">{row[7].toFixed(2)}</td>
+                <td className="px-2 py-1.5 text-right text-slate-200">{row[8].toFixed(2)}</td>
+                <td className="px-2 py-1.5 text-right text-slate-200">{row[9].toFixed(2)}</td>
+                <td className="px-2 py-1.5 text-right text-slate-200">{cell(fck[i], 2)}</td>
+                <td className="px-2 py-1.5 text-right text-slate-300">{cell(fst[i], 2)}</td>
+                <td className="px-2 py-1.5 text-right text-slate-300">{cell(ffl[i], 2)}</td>
+                <td className="px-2 py-1.5 text-right text-slate-300">{cell(ec[i], 2)}</td>
+                <td className="px-2 py-1.5 text-right text-slate-300">{cell(density[i], 0)}</td>
               </motion.tr>
             ))}
           </tbody>
@@ -132,110 +192,379 @@ function DatasetPreviewTable({
   );
 }
 
-function renderDataColumn(
-  dataSource: DataSource,
-  syntheticRowCount: number,
-  setSyntheticRowCount: (n: number) => void,
-  loadSynthetic: () => void,
-  setCsvText: (s: string) => void,
-  setError: (e: string | null) => void,
-  parsed: ReturnType<typeof parseDataset>,
-  markDatasetPrimed: () => void,
-  onOptimizeSetup: () => void
-) {
+interface DataColumnProps {
+  dataSource: DataSource;
+  syntheticRowCount: number;
+  setSyntheticRowCount: (n: number) => void;
+  loadSynthetic: () => void;
+  setCsvText: (s: string) => void;
+  setError: (e: string | null) => void;
+  parsed: ReturnType<typeof parseDataset>;
+  markDatasetPrimed: () => void;
+  onOptimizeSetup: () => void;
+  loadCopperSlagTemplate: () => void;
+  fetchUrl: string;
+  setFetchUrl: (s: string) => void;
+  fetchingUrl: boolean;
+  loadFromUrl: (url?: string) => void;
+  loadExternal: (d: ExternalDataset) => void;
+}
+
+function DataColumn(p: DataColumnProps) {
+  const {
+    dataSource,
+    syntheticRowCount,
+    setSyntheticRowCount,
+    loadSynthetic,
+    setCsvText,
+    setError,
+    parsed,
+    markDatasetPrimed,
+    onOptimizeSetup,
+    loadCopperSlagTemplate,
+    fetchUrl,
+    setFetchUrl,
+    fetchingUrl,
+    loadFromUrl,
+    loadExternal,
+  } = p;
+
   return (
     <>
-      <p className="mb-1 text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-amber-200/90">
-        Data source
-      </p>
-      <h2 className="mb-3 text-base font-semibold text-white sm:text-lg">Training data</h2>
+      <SectionHeader eyebrow="Data source" title="Training data" />
 
       <div className="shrink-0">
         {dataSource === 'sample' && (
           <>
-            <p className="mb-3 text-sm leading-relaxed text-slate-400">
-              Generate data or edit CSV in <strong className="text-slate-200">Training setup</strong>
-              .
+            <p className="mb-3 text-[0.8rem] leading-relaxed text-slate-400">
+              Generate plausible rows from the synthetic recipe, load the small demo, or
+              paste a CSV in <strong className="text-slate-200">Training setup</strong>.
             </p>
-            <div className="mb-3 flex flex-wrap items-end gap-3">
-              <label className="flex max-w-[6rem] flex-col gap-1 text-xs font-medium text-slate-500">
-                Row count
-                <input
+            <div className="mb-3 flex flex-wrap items-end gap-2.5">
+              <div className="w-[6.5rem]">
+                <Field
+                  label="Rows"
                   type="number"
                   min={20}
                   max={500}
                   value={syntheticRowCount}
                   onChange={(e) => setSyntheticRowCount(Number(e.target.value))}
-                  className="rounded-lg border border-white/10 bg-black/40 px-3 py-2 font-mono text-sm text-white focus:border-cyan-500/50 focus:outline-none focus:ring-2 focus:ring-cyan-500/30"
                 />
-              </label>
-              <motion.button
-                type="button"
-                className="rounded-xl bg-gradient-to-br from-cyan-400 to-teal-600 px-4 py-2.5 text-sm font-semibold text-slate-950 shadow-lg shadow-cyan-500/20"
+              </div>
+              <Button
+                variant="primary"
                 onClick={() => {
                   loadSynthetic();
                   markDatasetPrimed();
                 }}
-                whileHover={{ scale: 1.03, boxShadow: '0 0 32px -4px rgba(62,232,214,0.45)' }}
-                whileTap={tapScale}
               >
-                Generate plausible data
-              </motion.button>
-              <motion.button
-                type="button"
-                className="rounded-xl border border-white/15 bg-white/5 px-4 py-2.5 text-sm font-semibold text-slate-200"
+                Generate
+              </Button>
+              <Button
+                variant="secondary"
                 onClick={() => {
                   setCsvText(DEMO_CSV);
                   setError(null);
                   markDatasetPrimed();
                 }}
-                whileHover={{ scale: 1.02, borderColor: 'rgba(232,212,184,0.35)' }}
-                whileTap={tapScale}
               >
-                Load small demo
-              </motion.button>
-              <motion.button
-                type="button"
-                className="rounded-xl border border-amber-200/25 bg-amber-200/[0.08] px-4 py-2.5 text-sm font-semibold text-amber-100"
+                Small demo
+              </Button>
+              <Button
+                variant="secondary"
+                onClick={loadCopperSlagTemplate}
+                title="Load the copper-slag CSV header with a few starter rows you can edit and replace with lab data"
+              >
+                Copper-slag template
+              </Button>
+              <Button
+                variant="accent"
+                glow
                 onClick={onOptimizeSetup}
                 title="Larger synthetic set + tuned epochs, learning rate, and validation split"
-                whileHover={{ scale: 1.02, borderColor: 'rgba(253,230,138,0.45)' }}
-                whileTap={tapScale}
               >
                 Optimize setup
-              </motion.button>
+              </Button>
             </div>
             <div className="mb-2 flex flex-wrap gap-2">
               {parsed.error ? (
-                <span className="inline-flex rounded-full border border-red-400/25 bg-red-500/10 px-3 py-1 font-mono text-xs text-red-300">
+                <span className="inline-flex rounded-full border border-red-400/25 bg-red-500/10 px-3 py-1 font-mono text-[0.7rem] text-red-300">
                   {parsed.error}
                 </span>
               ) : (
-                <span className="inline-flex rounded-full border border-emerald-400/25 bg-emerald-500/10 px-3 py-1 font-mono text-xs text-emerald-300">
-                  {parsed.X.length} row{parsed.X.length === 1 ? '' : 's'} in dataset
+                <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-400/20 bg-emerald-500/[0.08] px-3 py-1 font-mono text-[0.7rem] text-emerald-300">
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                  {parsed.X.length} row{parsed.X.length === 1 ? '' : 's'} ·{' '}
+                  {parsed.availableOutputs.length} output
+                  {parsed.availableOutputs.length === 1 ? '' : 's'}
+                </span>
+              )}
+              {parsed.defaultedFeatures.length > 0 && (
+                <span className="inline-flex rounded-full border border-amber-400/20 bg-amber-500/[0.08] px-3 py-1 font-mono text-[0.7rem] text-amber-200/90">
+                  {parsed.defaultedFeatures.length} column(s) defaulted
                 </span>
               )}
             </div>
           </>
         )}
 
-        {dataSource === 'sem' && (
-          <div className="mb-3 rounded-xl border border-dashed border-amber-200/20 bg-amber-200/[0.05] p-4 text-sm leading-relaxed text-slate-400">
-            <strong className="text-amber-200/90">Future work.</strong> SEM upload and
-            auto-extraction are not implemented. Use ImageJ offline, then paste CSV in{' '}
-            <strong className="text-slate-200">Training setup</strong>. The table below reflects
-            whatever is currently loaded.
-          </div>
+        {dataSource === 'url' && (
+          <>
+            <p className="mb-3 text-[0.8rem] leading-relaxed text-slate-400">
+              Paste a raw CSV URL (GitHub raw, gist, or any CORS-friendly host).
+              Required columns:{' '}
+              <code className="rounded bg-white/[0.06] px-1.5 py-0.5 font-mono text-[0.7rem] text-slate-300">
+                Cement, Water, Fine aggregate, Coarse aggregate, Curing days, Compressive strength
+              </code>
+              . Other columns are optional — missing inputs are filled with sensible
+              defaults.
+            </p>
+            <div className="mb-3 flex flex-wrap items-end gap-2.5">
+              <div className="min-w-[18rem] flex-1">
+                <Field
+                  label="CSV URL"
+                  type="url"
+                  placeholder="https://raw.githubusercontent.com/.../dataset.csv"
+                  value={fetchUrl}
+                  onChange={(e) => setFetchUrl(e.target.value)}
+                />
+              </div>
+              <Button
+                variant="primary"
+                disabled={fetchingUrl || !fetchUrl}
+                loading={fetchingUrl}
+                onClick={() => loadFromUrl()}
+              >
+                {fetchingUrl ? 'Fetching…' : 'Fetch CSV'}
+              </Button>
+            </div>
+
+            <div className="mb-2">
+              <p className="mb-2 text-[0.6rem] font-medium uppercase tracking-[0.12em] text-slate-500">
+                One-click public datasets
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {EXTERNAL_DATASETS.map((d) => (
+                  <Button
+                    key={d.id}
+                    variant="accent"
+                    disabled={fetchingUrl}
+                    onClick={() => loadExternal(d)}
+                    title={d.caveat}
+                  >
+                    {d.label}
+                  </Button>
+                ))}
+              </div>
+            </div>
+          </>
         )}
       </div>
 
-      <div className="mt-1 flex min-h-0 flex-1 flex-col">
-        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-white/10 bg-black/40">
+      <div className="mt-3 flex min-h-0 flex-1 flex-col">
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-white/[0.06] bg-black/30">
           <DatasetPreviewTable parsed={parsed} />
         </div>
       </div>
     </>
   );
+}
+
+function DatasetDialog({
+  open,
+  onClose,
+  parsed,
+}: {
+  open: boolean;
+  onClose: () => void;
+  parsed: ReturnType<typeof parseDataset>;
+}) {
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open, onClose]);
+
+  return (
+    <AnimatePresence>
+      {open && (
+        <motion.div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4 py-6 backdrop-blur-sm"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          onClick={onClose}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Parsed CSV preview"
+        >
+          <motion.div
+            className="relative flex h-[min(85vh,720px)] w-full max-w-6xl flex-col overflow-hidden rounded-2xl border border-white/[0.08] bg-slate-950/97 shadow-2xl shadow-black/60"
+            initial={{ opacity: 0, y: 16, scale: 0.98 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 16, scale: 0.98 }}
+            transition={{ type: 'spring', stiffness: 320, damping: 28 }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex shrink-0 items-start justify-between gap-4 border-b border-white/[0.06] px-6 py-4">
+              <div>
+                <p className="text-[0.6rem] font-semibold uppercase tracking-[0.16em] text-cyan-300/90">
+                  Training data
+                </p>
+                <h2 className="mt-1 text-lg font-semibold text-white">
+                  Parsed CSV preview
+                </h2>
+                <p className="mt-1 text-[0.7rem] leading-relaxed text-slate-500">
+                  {parsed.X.length} row{parsed.X.length === 1 ? '' : 's'} ·{' '}
+                  {parsed.availableOutputs.length} output column
+                  {parsed.availableOutputs.length === 1 ? '' : 's'} present
+                  {parsed.availableOutputs.length > 0
+                    ? ` (${parsed.availableOutputs.join(', ')})`
+                    : ''}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={onClose}
+                aria-label="Close"
+                className="rounded-md border border-white/10 bg-white/5 px-2.5 py-1.5 text-xs font-medium text-slate-300 transition-colors hover:border-white/30 hover:text-white"
+              >
+                Close
+              </button>
+            </div>
+            <div className="flex min-h-0 flex-1 flex-col">
+              <DatasetPreviewTable parsed={parsed} />
+            </div>
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
+}
+
+function RatioField({
+  label,
+  hint,
+  value,
+  onCommit,
+}: {
+  label: string;
+  hint: string;
+  value: number;
+  onCommit: (next: number) => void;
+}) {
+  const [leftText, setLeftText] = useState('1');
+  const [rightText, setRightText] = useState(() => formatRatioDenom(value));
+  const focusCountRef = useRef(0);
+
+  useEffect(() => {
+    if (focusCountRef.current > 0) return;
+    const num = Number.parseFloat(leftText);
+    const den = Number.parseFloat(rightText);
+    if (
+      Number.isFinite(num) &&
+      Number.isFinite(den) &&
+      num > 0 &&
+      den > 0 &&
+      Math.abs(num / den - value) <= 5e-4
+    ) {
+      return;
+    }
+    setLeftText('1');
+    setRightText(formatRatioDenom(value));
+  }, [value]);
+
+  const tryCommit = (l: string, r: string) => {
+    const num = Number.parseFloat(l);
+    const den = Number.parseFloat(r);
+    if (Number.isFinite(num) && Number.isFinite(den) && num > 0 && den > 0) {
+      onCommit(num / den);
+    }
+  };
+
+  const handleFocus = () => {
+    focusCountRef.current += 1;
+  };
+
+  const handleBlur = () => {
+    focusCountRef.current = Math.max(0, focusCountRef.current - 1);
+    if (focusCountRef.current > 0) return;
+    const num = Number.parseFloat(leftText);
+    const den = Number.parseFloat(rightText);
+    if (!Number.isFinite(num) || !Number.isFinite(den) || num <= 0 || den <= 0) {
+      setLeftText('1');
+      setRightText(formatRatioDenom(value));
+    }
+  };
+
+  const inputClass = [
+    'w-full min-w-0 rounded-xl border border-white/10 bg-black/40 px-3 py-2.5 font-mono text-sm text-white text-center',
+    'placeholder:text-slate-600',
+    'transition-[border-color,box-shadow,background-color] duration-200',
+    'hover:border-white/20',
+    'focus:border-cyan-400/60 focus:outline-none focus:ring-2 focus:ring-cyan-400/25',
+  ].join(' ');
+
+  return (
+    <div className="flex min-w-0 flex-col gap-1.5">
+      <label className="text-[0.65rem] font-medium uppercase tracking-[0.1em] text-slate-500">
+        {label}
+      </label>
+      <div className="flex min-w-0 items-center gap-2">
+        <input
+          type="text"
+          inputMode="decimal"
+          autoComplete="off"
+          spellCheck={false}
+          aria-label={`${label} — first number`}
+          className={inputClass}
+          value={leftText}
+          onFocus={handleFocus}
+          onBlur={handleBlur}
+          onChange={(e) => {
+            const v = e.target.value;
+            setLeftText(v);
+            tryCommit(v, rightText);
+          }}
+        />
+        <span
+          aria-hidden
+          className="select-none font-mono text-base font-semibold text-slate-400"
+        >
+          :
+        </span>
+        <input
+          type="text"
+          inputMode="decimal"
+          autoComplete="off"
+          spellCheck={false}
+          aria-label={`${label} — second number`}
+          className={inputClass}
+          value={rightText}
+          onFocus={handleFocus}
+          onBlur={handleBlur}
+          onChange={(e) => {
+            const v = e.target.value;
+            setRightText(v);
+            tryCommit(leftText, v);
+          }}
+        />
+      </div>
+      {hint && <p className="text-[0.65rem] leading-relaxed text-slate-500">{hint}</p>}
+    </div>
+  );
+}
+
+/**
+ * Given a positive ratio = a/b, return the canonical denominator value to
+ * display when the numerator is shown as 1 (i.e. b/a, rounded to 3 decimals).
+ */
+function formatRatioDenom(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '0';
+  return (1 / value).toFixed(3);
 }
 
 export default function App() {
@@ -244,19 +573,25 @@ export default function App() {
 
   const [dataSource, setDataSource] = useState<DataSource>('sample');
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [datasetDialogOpen, setDatasetDialogOpen] = useState(false);
   const [csvText, setCsvText] = useState(DEMO_CSV);
-  const [syntheticRowCount, setSyntheticRowCount] = useState(100);
-  const [epochs, setEpochs] = useState(220);
-  const [lr, setLr] = useState(0.012);
+  const [syntheticRowCount, setSyntheticRowCount] = useState(120);
+  const [epochs, setEpochs] = useState(260);
+  const [lr, setLr] = useState(0.01);
   const [valFrac, setValFrac] = useState(0.2);
   const [epochLogs, setEpochLogs] = useState<EpochLog[]>([]);
+  const [batchProgress, setBatchProgress] = useState<BatchProgress | null>(null);
   const [training, setTraining] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [bundle, setBundle] = useState<TrainedBundle | null>(null);
   const [inputs, setInputs] = useState<FeatureRow>(() =>
-    loadStoredFeatureInputs([...defaultInputs])
+    loadStoredFeatureInputs([...FEATURE_DEFAULTS] as FeatureRow)
   );
-  const [prediction, setPrediction] = useState<number | null>(null);
+  const [prediction, setPrediction] = useState<Partial<Record<OutputKey, number>> | null>(null);
+  const [exposure, setExposure] = useState<Exposure>('moderate');
+  const [fetchUrl, setFetchUrl] = useState('');
+  const [fetchingUrl, setFetchingUrl] = useState(false);
+  const [methodologyOpen, setMethodologyOpen] = useState(false);
 
   const [datasetPrimed, setDatasetPrimed] = useState(false);
   const [hasSavedInputs, setHasSavedInputs] = useState(false);
@@ -279,6 +614,22 @@ export default function App() {
 
   const parsed = useMemo(() => parseDataset(csvText), [csvText]);
 
+  const compliance = useMemo(
+    () =>
+      complianceReport(
+        {
+          cement: inputs[0],
+          water: inputs[1],
+          fineAgg: inputs[2],
+          coarseAgg: inputs[3],
+          fm: inputs[9],
+          copperSlagPct: inputs[4],
+        },
+        exposure
+      ),
+    [inputs, exposure]
+  );
+
   const markDatasetPrimed = useCallback(() => {
     setDatasetPrimed(true);
     setHasSavedInputs(false);
@@ -288,14 +639,69 @@ export default function App() {
     const n = Math.min(500, Math.max(20, Math.round(syntheticRowCount)));
     const { X, y } = generateDemoData(n);
     const header =
-      'Cement,Water,Copper slag %,Curing days,Porosity %,Crack density,Compressive strength';
+      'Cement,Water,Fine aggregate,Coarse aggregate,Copper slag %,Curing days,SG cement,SG fine,SG coarse,Fineness modulus,Compressive strength,Split tensile,Flexural strength,Modulus of elasticity,Density';
     const rows = X.map(
       (r, i) =>
-        `${r[0].toFixed(1)},${r[1].toFixed(1)},${r[2].toFixed(1)},${r[3]},${r[4].toFixed(2)},${r[5].toFixed(2)},${y[i]}`
+        [
+          r[0].toFixed(1),
+          r[1].toFixed(1),
+          r[2].toFixed(1),
+          r[3].toFixed(1),
+          r[4].toFixed(1),
+          r[5],
+          r[6].toFixed(2),
+          r[7].toFixed(2),
+          r[8].toFixed(2),
+          r[9].toFixed(2),
+          y.fck[i].toFixed(2),
+          y.fst[i].toFixed(2),
+          y.ffl[i].toFixed(2),
+          y.ec[i].toFixed(2),
+          y.density[i].toFixed(0),
+        ].join(',')
     );
     setCsvText([header, ...rows].join('\n'));
     setError(null);
   }, [syntheticRowCount]);
+
+  const loadFromUrl = useCallback(
+    async (overrideUrl?: string) => {
+      const target = overrideUrl ?? fetchUrl;
+      if (!target) return;
+      setFetchingUrl(true);
+      setError(null);
+      try {
+        const res = await fetch(target);
+        if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+        const text = await res.text();
+        setCsvText(text);
+        markDatasetPrimed();
+      } catch (e) {
+        setError(
+          e instanceof Error
+            ? `Could not fetch CSV: ${e.message}. The host may not allow cross-origin requests; try a GitHub raw URL.`
+            : String(e)
+        );
+      } finally {
+        setFetchingUrl(false);
+      }
+    },
+    [fetchUrl, markDatasetPrimed]
+  );
+
+  const loadCopperSlagTemplate = useCallback(() => {
+    setCsvText(COPPER_SLAG_TEMPLATE_CSV);
+    setError(null);
+    markDatasetPrimed();
+  }, [markDatasetPrimed]);
+
+  const loadExternal = useCallback(
+    (d: ExternalDataset) => {
+      setFetchUrl(d.url);
+      void loadFromUrl(d.url);
+    },
+    [loadFromUrl]
+  );
 
   const showTrainColumn = datasetPrimed && hasSavedInputs && !threeColLayout;
   const workspacePhase = threeColLayout ? 'p3' : showTrainColumn ? 'p2' : 'p1';
@@ -329,6 +735,7 @@ export default function App() {
     setError(null);
     setTraining(true);
     setEpochLogs([]);
+    setBatchProgress(null);
     setBundle(null);
     setPrediction(null);
 
@@ -338,20 +745,31 @@ export default function App() {
     }
 
     try {
-      const result = await trainAnn(parsed.X, parsed.y, {
-        epochs,
-        learningRate: lr,
-        validationFraction: valFrac,
-        onEpoch: (log) => {
-          setEpochLogs((prev) => [...prev, log]);
+      const result = await trainAnn(
+        {
+          X: parsed.X,
+          y: parsed.y,
+          availableOutputs: parsed.availableOutputs,
         },
-      });
+        {
+          epochs,
+          learningRate: lr,
+          validationFraction: valFrac,
+          onEpoch: (log) => {
+            setEpochLogs((prev) => [...prev, log]);
+          },
+          onBatch: (p) => {
+            setBatchProgress(p);
+          },
+        }
+      );
       modelRef.current = result.model;
       setBundle(result);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setTraining(false);
+      setBatchProgress(null);
     }
   };
 
@@ -362,7 +780,7 @@ export default function App() {
 
   const runPredict = () => {
     if (!bundle) return;
-    const v = predictStrength(bundle.model, bundle.norm, inputs);
+    const v = predictAll(bundle.model, bundle.norm, inputs);
     setPrediction(v);
   };
 
@@ -378,6 +796,33 @@ export default function App() {
       return next;
     });
   };
+
+  const ratios = useMemo(() => deriveRatios(inputs), [inputs]);
+
+  const updateRatio = useCallback((which: 0 | 1 | 2 | 3, value: number) => {
+    if (!Number.isFinite(value) || value <= 0) return;
+    setHasSavedInputs(false);
+    setInputs((prev) => {
+      const next = [...prev] as FeatureRow;
+      const cement = next[0];
+      const fine = next[2];
+      switch (which) {
+        case 0:
+          next[1] = value * cement;
+          break;
+        case 1:
+          next[2] = cement / value;
+          break;
+        case 2:
+          next[3] = cement / value;
+          break;
+        case 3:
+          next[3] = fine / value;
+          break;
+      }
+      return next;
+    });
+  }, []);
 
   const applyOptimalTrainingSetup = useCallback(() => {
     setSyntheticRowCount(OPTIMAL_TRAINING.syntheticRowCount);
@@ -401,15 +846,15 @@ export default function App() {
     setOptimizingInputs(true);
     try {
       const next = bundle
-        ? await searchMaxStrengthInputs(bundle.model, bundle.norm)
-        : await searchMaxStrengthSynthetic();
+        ? await searchMaxStrengthInputs(bundle.model, bundle.norm, exposure)
+        : await searchMaxStrengthSynthetic(exposure);
       setInputs(next);
       setHasSavedInputs(false);
     } finally {
       optimizeInputsBusy.current = false;
       setOptimizingInputs(false);
     }
-  }, [bundle]);
+  }, [bundle, exposure]);
 
   const refreshApp = useCallback(() => {
     if (modelRef.current) {
@@ -419,9 +864,9 @@ export default function App() {
     setSidebarOpen(false);
     setDataSource('sample');
     setCsvText(DEMO_CSV);
-    setSyntheticRowCount(100);
-    setEpochs(220);
-    setLr(0.012);
+    setSyntheticRowCount(120);
+    setEpochs(260);
+    setLr(0.01);
     setValFrac(0.2);
     setEpochLogs([]);
     setTraining(false);
@@ -442,7 +887,12 @@ export default function App() {
       className="relative isolate flex h-full max-h-[100dvh] min-h-0 flex-col overflow-hidden bg-[#07080c] text-slate-100"
       data-phase={workspacePhase}
     >
-      <div        className="pointer-events-none absolute inset-0 -z-10 bg-[radial-gradient(ellipse_85%_55%_at_0%_-10%,rgba(212,184,150,0.14),transparent_52%),radial-gradient(ellipse_70%_45%_at_100%_0%,rgba(45,212,191,0.08),transparent_48%),radial-gradient(ellipse_60%_40%_at_50%_110%,rgba(15,118,110,0.12),transparent_55%)]"
+      <MethodologyDialog
+        open={methodologyOpen}
+        onClose={() => setMethodologyOpen(false)}
+      />
+      <div
+        className="pointer-events-none absolute inset-0 -z-10 bg-[radial-gradient(ellipse_85%_55%_at_0%_-10%,rgba(212,184,150,0.14),transparent_52%),radial-gradient(ellipse_70%_45%_at_100%_0%,rgba(45,212,191,0.08),transparent_48%),radial-gradient(ellipse_60%_40%_at_50%_110%,rgba(15,118,110,0.12),transparent_55%)]"
         aria-hidden
       />
       <div
@@ -459,41 +909,66 @@ export default function App() {
           className="relative z-[1] flex min-h-0 flex-1 flex-col overflow-y-auto overflow-x-hidden px-[clamp(1rem,4vw,3.75rem)] py-[clamp(0.5rem,1.8vh,1.35rem)]"
         >
           <motion.div
-            className="mb-4 flex shrink-0 flex-wrap items-start justify-between gap-4 border-b border-white/10 pb-4"
+            className="mb-5 flex shrink-0 flex-wrap items-end justify-between gap-4 border-b border-white/[0.06] pb-4"
             style={{ y: heroY }}
           >
             <header className="min-w-0 flex-1">
-              <motion.h1
-                className="mb-2 bg-gradient-to-r from-white via-white to-amber-200/90 bg-clip-text font-display text-[clamp(1.5rem,1.35rem+2.2vw,3rem)] font-semibold leading-tight tracking-[0.03em] text-transparent"
-                initial={{ opacity: 0, y: 16 }}
+              <motion.div
+                initial={{ opacity: 0, y: -4 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={reduce ? { duration: 0.2 } : springSoft}
+                transition={{ duration: 0.4, ease: [0.4, 0, 0.2, 1] }}
+                className="mb-1.5 inline-flex items-center gap-2 text-[0.6rem] font-medium uppercase tracking-[0.16em] text-slate-500"
+              >
+                <span className="inline-block h-1.5 w-1.5 rounded-full bg-cyan-400/80 shadow-[0_0_10px_rgba(62,232,214,0.55)]" />
+                ANN mix-design model
+              </motion.div>
+              <motion.h1
+                className="text-[clamp(1.5rem,1.35rem+1.6vw,2.5rem)] font-semibold leading-[1.1] tracking-tight text-white"
+                initial={{ opacity: 0, y: 12 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={reduce ? { duration: 0.2 } : { duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
               >
                 Copper slag concrete
               </motion.h1>
-              <p className="max-w-[min(42rem,55vw)] text-[clamp(0.8125rem,0.75rem+0.35vw,0.9375rem)] leading-relaxed text-slate-400">
-                <strong className="font-semibold text-amber-200/90">ANN</strong> compressive strength
-                · TensorFlow.js in-browser. Mix design plus SEM-derived{' '}
-                <strong className="text-slate-200">porosity</strong> and{' '}
-                <strong className="text-slate-200">crack density</strong> as inputs.
-              </p>
+              <motion.p
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ duration: 0.4, delay: 0.1 }}
+                className="mt-2 max-w-[min(46rem,60vw)] text-[clamp(0.8125rem,0.75rem+0.3vw,0.9rem)] leading-relaxed text-slate-400"
+              >
+                In-browser TensorFlow.js training with IS 456 / 10262 / 383 reference
+                checks. Predicts compressive, split tensile, flexural, modulus of
+                elasticity, and density.
+              </motion.p>
             </header>
-            <div className="flex shrink-0 flex-wrap items-center gap-2">
-              <motion.button
-                type="button"
-                className="flex items-center gap-2 rounded-2xl border border-white/15 bg-white/[0.06] px-4 py-2.5 text-sm font-semibold tracking-wide text-slate-100 shadow-xl shadow-black/30 backdrop-blur-xl"
+            <motion.div
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.4, delay: 0.12, ease: [0.4, 0, 0.2, 1] }}
+              className="flex shrink-0 flex-wrap items-end gap-2"
+            >
+              <label className="flex flex-col gap-1.5 text-[0.6rem] font-medium uppercase tracking-[0.12em] text-slate-500">
+                Exposure
+                <select
+                  value={exposure}
+                  onChange={(e) => setExposure(e.target.value as Exposure)}
+                  className="h-10 rounded-xl border border-white/10 bg-black/40 px-3 font-mono text-xs text-slate-100 transition-colors hover:border-white/20 focus:border-cyan-400/60 focus:outline-none focus:ring-2 focus:ring-cyan-400/25"
+                >
+                  {EXPOSURE_KEYS.map((k) => (
+                    <option key={k} value={k}>
+                      {EXPOSURE_LABELS[k]}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <Button
+                variant="secondary"
                 onClick={refreshApp}
-                aria-label="Reset application — clears model and training data; inference mix values stay and remain saved in the browser"
+                aria-label="Reset model and training data"
                 title="Reset model and data (inference numbers stay saved in this browser)"
-                whileHover={{
-                  scale: 1.03,
-                  borderColor: 'rgba(255,255,255,0.28)',
-                  boxShadow: '0 0 28px -8px rgba(255,255,255,0.12)',
-                }}
-                whileTap={tapScale}
               >
                 <svg
-                  className="h-4 w-4 shrink-0 text-slate-300"
+                  className="h-3.5 w-3.5"
                   viewBox="0 0 24 24"
                   fill="none"
                   stroke="currentColor"
@@ -508,67 +983,58 @@ export default function App() {
                   <path d="M16 16h5v5" />
                 </svg>
                 Refresh
-              </motion.button>
-              <motion.button
-                type="button"
-                className="flex shrink-0 items-center gap-2 rounded-2xl border border-white/15 bg-white/[0.06] px-5 py-2.5 text-sm font-semibold tracking-wide text-slate-100 shadow-xl shadow-black/30 backdrop-blur-xl"
+              </Button>
+              <Button
+                variant="primary"
                 onClick={() => setSidebarOpen(true)}
                 aria-expanded={sidebarOpen}
-                whileHover={{
-                  scale: 1.03,
-                  borderColor: 'rgba(62,232,214,0.35)',
-                  boxShadow: '0 0 40px -8px rgba(62,232,214,0.25)',
-                }}
-                whileTap={tapScale}
               >
-                <span
-                  className="h-2 w-2 shrink-0 rounded-full bg-cyan-400 shadow-[0_0_14px_rgba(62,232,214,0.55)]"
-                  aria-hidden
-                />
+                <span className="h-1.5 w-1.5 rounded-full bg-slate-950" aria-hidden />
                 Training setup
-              </motion.button>
-            </div>
+              </Button>
+            </motion.div>
           </motion.div>
 
           <motion.section
-            className={`${glassPanel} mb-4 shrink-0 px-[clamp(1rem,2.5vw,1.5rem)] py-[clamp(0.85rem,2vw,1.15rem)]`}
+            className={`${glassPanel} mb-4 shrink-0 px-[clamp(1rem,2.5vw,1.5rem)] py-[clamp(0.9rem,2vw,1.15rem)]`}
             variants={staggerContainer}
             initial="hidden"
             animate="show"
             aria-label="Data source selection"
           >
-            <motion.p
+            <SectionHeader
+              eyebrow="Data source"
+              title="Build your training table"
+              className="mb-3"
+            />
+            <motion.div
               variants={fadeUp}
-              className="mb-1 text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-amber-200/90"
+              role="tablist"
+              aria-label="Data source"
+              className="flex gap-1 rounded-xl border border-white/[0.06] bg-black/30 p-1"
             >
-              Data source
-            </motion.p>
-            <motion.h2 variants={fadeUp} className="mb-4 text-base font-semibold text-white sm:text-lg">
-              Build your training table
-            </motion.h2>
-            <motion.div variants={fadeUp} role="tablist" aria-label="Data source" className="flex gap-1.5 rounded-2xl border border-white/10 bg-black/40 p-1.5 shadow-inner shadow-black/40">
-              {(['sample', 'sem'] as const).map((tab) => (
+              {(['sample', 'url'] as const).map((tab) => (
                 <motion.button
                   key={tab}
                   type="button"
                   role="tab"
                   aria-selected={dataSource === tab}
                   onClick={() => setDataSource(tab)}
-                  className={`relative flex-1 rounded-xl px-4 py-3 text-sm font-semibold tracking-wide transition-colors ${
+                  className={`relative flex-1 rounded-lg px-4 py-2.5 text-sm font-medium tracking-tight transition-colors ${
                     dataSource === tab
-                      ? 'text-slate-950'
-                      : 'text-slate-500 hover:bg-white/[0.04] hover:text-slate-300'
+                      ? 'text-white'
+                      : 'text-slate-500 hover:text-slate-300'
                   }`}
                   whileTap={{ scale: 0.98 }}
                 >
                   {dataSource === tab && (
                     <motion.span
                       layoutId="tab-pill"
-                      className="absolute inset-0 -z-10 rounded-xl bg-gradient-to-br from-amber-200 via-amber-400/90 to-amber-700/80 shadow-lg shadow-amber-500/20"
-                      transition={springSoft}
+                      className="absolute inset-0 -z-10 rounded-lg bg-white/[0.06] ring-1 ring-white/10"
+                      transition={{ type: 'spring', stiffness: 380, damping: 32 }}
                     />
                   )}
-                  {tab === 'sample' ? 'Sample data' : 'SEM images'}
+                  {tab === 'sample' ? 'Sample data' : 'Fetch CSV from URL'}
                 </motion.button>
               ))}
             </motion.div>
@@ -587,17 +1053,23 @@ export default function App() {
               animate={{ opacity: 1, y: 0 }}
               transition={{ ...springSoft, delay: 0.05 }}
             >
-              {renderDataColumn(
-                dataSource,
-                syntheticRowCount,
-                setSyntheticRowCount,
-                loadSynthetic,
-                setCsvText,
-                setError,
-                parsed,
-                markDatasetPrimed,
-                applyOptimalTrainingSetup
-              )}
+              <DataColumn
+                dataSource={dataSource}
+                syntheticRowCount={syntheticRowCount}
+                setSyntheticRowCount={setSyntheticRowCount}
+                loadSynthetic={loadSynthetic}
+                setCsvText={setCsvText}
+                setError={setError}
+                parsed={parsed}
+                markDatasetPrimed={markDatasetPrimed}
+                onOptimizeSetup={applyOptimalTrainingSetup}
+                loadCopperSlagTemplate={loadCopperSlagTemplate}
+                fetchUrl={fetchUrl}
+                setFetchUrl={setFetchUrl}
+                fetchingUrl={fetchingUrl}
+                loadFromUrl={loadFromUrl}
+                loadExternal={loadExternal}
+              />
             </motion.section>
 
             <motion.section
@@ -613,66 +1085,57 @@ export default function App() {
                 {workspacePhase === 'p2' && (
                   <motion.div
                     key="train"
-                    className="flex min-h-0 flex-1 flex-col items-stretch justify-center text-center"
-                    initial={{ opacity: 0, scale: 0.92, filter: 'blur(8px)' }}
+                    className="flex min-h-0 flex-1 flex-col items-stretch justify-center"
+                    initial={{ opacity: 0, scale: 0.96, filter: 'blur(6px)' }}
                     animate={{ opacity: 1, scale: 1, filter: 'blur(0px)' }}
-                    exit={{ opacity: 0, scale: 0.96 }}
-                    transition={springSoft}
+                    exit={{ opacity: 0, scale: 0.97 }}
+                    transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
                   >
-                    <p className="mb-1 text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-amber-200/90">
-                      Train
-                    </p>
-                    <h2 className="mb-2 text-base font-semibold text-white">Ready</h2>
-                    <p className="mb-6 text-left text-sm leading-relaxed text-slate-400">
+                    <SectionHeader eyebrow="Train" title="Ready to train" />
+                    <p className="mb-6 text-[0.85rem] leading-relaxed text-slate-400">
                       Dataset loaded and inputs saved. Tune epochs &amp; learning rate in{' '}
                       <strong className="text-slate-200">Training setup</strong> if needed.
                     </p>
-                    <motion.button
-                      type="button"
+                    <Button
+                      variant="primary"
+                      size="lg"
+                      fullWidth
                       disabled={training}
+                      loading={training}
                       onClick={handleMainTrain}
-                      className="w-full rounded-2xl bg-gradient-to-br from-cyan-400 to-teal-600 py-4 text-sm font-bold tracking-wide text-slate-950 shadow-lg shadow-cyan-500/25 disabled:opacity-40"
-                      whileHover={!training ? { scale: 1.02, boxShadow: '0 0 40px -4px rgba(62,232,214,0.45)' } : {}}
-                      whileTap={!training ? tapScale : {}}
                     >
-                      {training ? (
-                        <span className="inline-flex items-center justify-center gap-2">
-                          <span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-900/30 border-t-slate-900" />
-                          Training…
-                        </span>
-                      ) : (
-                        'Train ANN'
-                      )}
-                    </motion.button>
+                      {training ? 'Training…' : 'Train ANN'}
+                    </Button>
                   </motion.div>
                 )}
                 {workspacePhase === 'p3' && (
                   <motion.div
                     key="diag"
                     className="flex min-h-0 flex-1 flex-col gap-3"
-                    initial={{ opacity: 0, y: 24 }}
+                    initial={{ opacity: 0, y: 16 }}
                     animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: -12 }}
-                    transition={springSoft}
+                    exit={{ opacity: 0, y: -8 }}
+                    transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
                   >
-                    <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-cyan-400/15 bg-gradient-to-b from-cyan-400/[0.06] to-transparent">
+                    <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.015]">
                       <DiagnosticsPanel
                         training={training}
                         error={error}
                         epochLogs={epochLogs}
                         bundle={bundle}
+                        batchProgress={batchProgress}
                       />
                     </div>
-                    <motion.button
-                      type="button"
-                      className="w-full shrink-0 rounded-2xl bg-gradient-to-br from-cyan-400 to-teal-600 py-3.5 text-sm font-bold text-slate-950 shadow-lg shadow-cyan-500/20 disabled:opacity-40"
+                    <Button
+                      variant="primary"
+                      size="lg"
+                      fullWidth
+                      glow
                       disabled={!bundle || training}
                       onClick={runPredict}
-                      whileHover={bundle && !training ? { scale: 1.02 } : {}}
-                      whileTap={bundle && !training ? tapScale : {}}
                     >
-                      Generate predicted strength
-                    </motion.button>
+                      Generate prediction
+                    </Button>
                   </motion.div>
                 )}
               </AnimatePresence>
@@ -686,82 +1149,157 @@ export default function App() {
               animate={{ opacity: 1, y: 0 }}
               transition={{ ...springSoft, delay: 0.1 }}
             >
-              <p className="mb-1 text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-amber-200/90">
-                Inference
-              </p>
-              <h2 className="mb-3 text-base font-semibold text-white sm:text-lg">
-                Predict compressive strength
-              </h2>
+              <SectionHeader
+                eyebrow="Inference"
+                title="Predict concrete properties"
+              />
               <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain pr-0.5">
                 {threeColLayout && (
-                  <p className="mb-4 text-sm leading-relaxed text-slate-400">
-                    Adjust inputs on the right, then use Generate predicted strength in Diagnostics — the score appears below.
+                  <p className="mb-4 text-[0.8rem] leading-relaxed text-slate-400">
+                    Adjust inputs, then click <strong className="text-slate-200">Generate
+                    prediction</strong> in Diagnostics — outputs animate in below the
+                    workspace.
                   </p>
                 )}
-                <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  {FEATURE_LABELS.map((label, i) => (
-                    <motion.label
-                      key={label}
-                      className="flex flex-col gap-1.5 text-xs font-medium text-slate-500"
-                      initial={{ opacity: 0, y: 8 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      transition={{ delay: i * 0.04, ...springSoft }}
+                {INPUT_GROUPS.map((group, gi) => (
+                  <motion.div
+                    key={group.title}
+                    className="mb-5"
+                    initial={{ opacity: 0, y: 8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: 0.05 + gi * 0.05, duration: 0.35, ease: [0.4, 0, 0.2, 1] }}
+                  >
+                    <p className="mb-2 text-[0.6rem] font-medium uppercase tracking-[0.12em] text-slate-500">
+                      {group.title}
+                    </p>
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                      {group.indices.map((i) => (
+                        <Field
+                          key={FEATURE_LABELS[i]}
+                          label={FEATURE_LABELS[i]}
+                          type="number"
+                          step="any"
+                          value={inputs[i]}
+                          onChange={(e) => updateInput(i, Number(e.target.value))}
+                        />
+                      ))}
+                    </div>
+                  </motion.div>
+                ))}
+
+                <motion.div
+                  className="mb-5"
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: 0.2, duration: 0.35, ease: [0.4, 0, 0.2, 1] }}
+                >
+                  <div className="mb-2 flex items-baseline justify-between gap-2">
+                    <p className="text-[0.6rem] font-medium uppercase tracking-[0.12em] text-slate-500">
+                      Mix ratios
+                    </p>
+                    <p className="text-[0.55rem] font-medium uppercase tracking-[0.16em] text-slate-600">
+                      enter as <span className="font-mono text-slate-400">a&nbsp;:&nbsp;b</span>
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-1 gap-4">
+                    <RatioField
+                      label="w/c ratio"
+                      hint="Updates Water"
+                      value={ratios[0]}
+                      onCommit={(v) => updateRatio(0, v)}
+                    />
+                    <RatioField
+                      label="Cement / Fine agg"
+                      hint="Updates Fine aggregate"
+                      value={ratios[1]}
+                      onCommit={(v) => updateRatio(1, v)}
+                    />
+                    <RatioField
+                      label="Cement / Coarse agg"
+                      hint="Updates Coarse aggregate"
+                      value={ratios[2]}
+                      onCommit={(v) => updateRatio(2, v)}
+                    />
+                    <RatioField
+                      label="Fine / Coarse agg"
+                      hint="Updates Coarse aggregate"
+                      value={ratios[3]}
+                      onCommit={(v) => updateRatio(3, v)}
+                    />
+                  </div>
+                </motion.div>
+
+                <motion.div
+                  layout
+                  className="mb-4 rounded-2xl border border-white/[0.08] bg-black/20 p-3.5"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  transition={{ delay: 0.25, duration: 0.35 }}
+                >
+                  <div className="mb-2.5 flex items-center justify-between gap-2">
+                    <p className="text-[0.6rem] font-medium uppercase tracking-[0.12em] text-amber-200/85">
+                      IS code check · {EXPOSURE_LABELS[exposure]}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setMethodologyOpen(true)}
+                      className="rounded-md border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[0.58rem] font-medium uppercase tracking-[0.12em] text-slate-400 transition-colors hover:border-white/25 hover:text-slate-100"
                     >
-                      {label}
-                      <input
-                        type="number"
-                        step="any"
-                        value={inputs[i]}
-                        onChange={(e) => updateInput(i, Number(e.target.value))}
-                        className="rounded-xl border border-white/10 bg-black/40 px-3 py-2.5 font-mono text-sm text-white transition-shadow focus:border-cyan-500/50 focus:outline-none focus:ring-2 focus:ring-cyan-500/30"
-                      />
-                    </motion.label>
-                  ))}
-                </div>
+                      View references
+                    </button>
+                  </div>
+                  <ul className="flex flex-col gap-1.5 font-mono text-[0.7rem]">
+                    {compliance.map((c) => (
+                      <motion.li
+                        key={c.clause}
+                        layout
+                        initial={false}
+                        animate={{ opacity: 1 }}
+                        className={`flex items-start gap-2 ${
+                          c.ok ? 'text-emerald-300/90' : 'text-amber-300/95'
+                        }`}
+                      >
+                        <span aria-hidden className="mt-0.5">
+                          {c.ok ? '✓' : '!'}
+                        </span>
+                        <span>
+                          <strong className="font-medium text-slate-300">
+                            {c.clause}:
+                          </strong>{' '}
+                          {c.message}
+                        </span>
+                      </motion.li>
+                    ))}
+                  </ul>
+                </motion.div>
+
                 <div className="mt-auto flex flex-wrap items-center gap-2 pt-1">
-                  <motion.button
-                    type="button"
-                    className="rounded-xl border border-amber-200/25 bg-amber-200/[0.08] px-4 py-2.5 text-sm font-semibold text-amber-100 disabled:opacity-35"
+                  <Button
+                    variant="accent"
                     disabled={training || optimizingInputs}
+                    loading={optimizingInputs}
                     onClick={() => void applyOptimizeInferenceInputs()}
                     title={
                       bundle
-                        ? 'Search for inputs that maximize ANN predicted strength'
-                        : 'Suggest a high-strength mix using the demo strength model (train the ANN for neural predictions)'
+                        ? `Search for IS-compliant (${EXPOSURE_LABELS[exposure]}) inputs that maximize ANN strength`
+                        : `Suggest a high-strength IS-compliant (${EXPOSURE_LABELS[exposure]}) mix using the demo formula`
                     }
-                    whileHover={
-                      !training && !optimizingInputs
-                        ? { scale: 1.02, borderColor: 'rgba(253,230,138,0.45)' }
-                        : {}
-                    }
-                    whileTap={!training && !optimizingInputs ? tapScale : {}}
                   >
-                    {optimizingInputs ? (
-                      <span className="inline-flex items-center gap-2">
-                        <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-amber-200/30 border-t-amber-200" />
-                        Optimizing…
-                      </span>
-                    ) : (
-                      'Optimize inputs'
-                    )}
-                  </motion.button>
-                  <motion.button
-                    type="button"
-                    className="rounded-xl border border-white/15 bg-white/5 px-4 py-2.5 text-sm font-semibold text-slate-200"
-                    onClick={saveInputs}
-                    whileHover={{ scale: 1.02, borderColor: 'rgba(232,212,184,0.35)' }}
-                    whileTap={tapScale}
-                  >
+                    {optimizingInputs ? 'Optimizing…' : 'Optimize inputs (IS-compliant)'}
+                  </Button>
+                  <Button variant="secondary" onClick={saveInputs}>
                     Save inputs
-                  </motion.button>
+                  </Button>
                   <AnimatePresence>
                     {hasSavedInputs && (
                       <motion.span
-                        initial={{ opacity: 0, scale: 0.9 }}
-                        animate={{ opacity: 1, scale: 1 }}
+                        initial={{ opacity: 0, scale: 0.95, x: -4 }}
+                        animate={{ opacity: 1, scale: 1, x: 0 }}
                         exit={{ opacity: 0, scale: 0.95 }}
-                        className="inline-flex rounded-full border border-emerald-400/25 bg-emerald-500/10 px-3 py-1 font-mono text-xs text-emerald-300"
+                        transition={{ duration: 0.25, ease: [0.4, 0, 0.2, 1] }}
+                        className="inline-flex items-center gap-1.5 rounded-full border border-emerald-400/25 bg-emerald-500/10 px-3 py-1 font-mono text-[0.7rem] text-emerald-300"
                       >
+                        <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
                         Inputs saved
                       </motion.span>
                     )}
@@ -775,51 +1313,65 @@ export default function App() {
             {threeColLayout && prediction != null && (
               <motion.section
                 layout
-                className={`${glassPanel} relative mt-2 shrink-0 px-3 py-3 sm:px-4 sm:py-3.5`}
-                aria-label={`Predicted compressive strength ${prediction.toFixed(2)} megapascals`}
+                className={`${glassPanel} relative mt-3 shrink-0 px-4 py-4 sm:px-5 sm:py-4`}
+                aria-label={
+                  prediction.fck != null
+                    ? `Predicted compressive strength ${prediction.fck.toFixed(2)} megapascals`
+                    : 'Predicted concrete properties'
+                }
                 aria-live="polite"
-                initial={{ opacity: 0, y: 12 }}
+                initial={{ opacity: 0, y: 16 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: 8 }}
-                transition={springSoft}
+                transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
               >
-                <motion.button
-                  type="button"
-                  className="absolute right-2 top-2 z-10 flex h-8 w-8 items-center justify-center rounded-xl border border-white/12 bg-black/35 text-slate-400 backdrop-blur-sm transition-colors hover:border-white/20 hover:text-slate-200"
-                  onClick={() => setPrediction(null)}
-                  aria-label="Dismiss prediction"
-                  whileHover={{ scale: 1.05 }}
-                  whileTap={tapScale}
-                >
-                  <span className="text-lg leading-none" aria-hidden>
-                    ×
-                  </span>
-                </motion.button>
-                <motion.div
-                  className="flex flex-col items-center justify-center gap-1 px-6 text-center"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  transition={{ delay: 0.04, ...springSoft }}
-                >
-                  <p className="text-sm font-medium text-slate-400 sm:text-base">
-                    compressive strength (MPa)
-                  </p>
-                  <p className="font-mono text-xl font-semibold tabular-nums tracking-tight text-cyan-300 sm:text-2xl">
-                    <span>{prediction.toFixed(2)}</span>
-                    <span className="ml-1.5 text-base font-medium text-slate-500 sm:text-lg">MPa</span>
-                  </p>
-                </motion.div>
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-[0.6rem] font-medium uppercase tracking-[0.14em] text-slate-500">
+                      Prediction
+                    </p>
+                    <p className="mt-0.5 text-[0.85rem] font-medium text-slate-200">
+                      ANN output for the current mix
+                    </p>
+                  </div>
+                  <motion.button
+                    type="button"
+                    className="flex h-8 w-8 items-center justify-center rounded-xl border border-white/10 bg-white/[0.04] text-slate-400 transition-colors hover:border-white/25 hover:text-slate-100"
+                    onClick={() => setPrediction(null)}
+                    aria-label="Dismiss prediction"
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
+                  >
+                    <span className="text-base leading-none" aria-hidden>
+                      ×
+                    </span>
+                  </motion.button>
+                </div>
+                <div className="flex flex-wrap items-stretch gap-3">
+                  {OUTPUT_KEYS.filter((k) => prediction[k] != null).map((k, idx) => (
+                    <StatCard
+                      key={k}
+                      label={OUTPUT_LABELS[k]}
+                      value={prediction[k]!}
+                      unit={OUTPUT_UNITS[k]}
+                      decimals={k === 'density' ? 0 : 2}
+                      emphasis={idx === 0}
+                      index={idx}
+                    />
+                  ))}
+                </div>
               </motion.section>
             )}
           </AnimatePresence>
 
           <motion.footer
-            className="shrink-0 pt-3 text-center font-mono text-[clamp(0.62rem,0.55rem+0.2vw,0.72rem)] tracking-wider text-slate-500"
+            className="shrink-0 pt-4 text-center text-[clamp(0.65rem,0.6rem+0.15vw,0.72rem)] tracking-wide text-slate-500"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             transition={{ delay: 0.3, duration: 0.5 }}
           >
-            Client-side only — use lab + ImageJ-derived porosity & crack density for real work.
+            Client-side only · IS code checks are reference guardrails, not lab
+            certification. Validate any mix with proper laboratory testing.
           </motion.footer>
         </div>
       </LayoutGroup>
@@ -834,6 +1386,20 @@ export default function App() {
         valFrac={valFrac}
         setValFrac={setValFrac}
         onOptimizeHyperparams={applyOptimalHyperparams}
+        onViewDataset={() => {
+          setSidebarOpen(false);
+          setDatasetDialogOpen(true);
+        }}
+        datasetSummary={{
+          rows: parsed.X.length,
+          outputs: parsed.availableOutputs.length,
+        }}
+      />
+
+      <DatasetDialog
+        open={datasetDialogOpen}
+        onClose={() => setDatasetDialogOpen(false)}
+        parsed={parsed}
       />
     </div>
   );
